@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Form Builder — Web3Forms</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Simple Form Builder (Web3Forms)</h1>
+      <p class="muted">Add fields, drag to reorder, preview, and export a static HTML form that sends submissions via Web3Forms.</p>
+    </header>
+
+    <main class="grid">
+      <section class="panel">
+        <h2>Form settings</h2>
+        <label>Form name
+          <input id="form-name" placeholder="Contact us" />
+        </label>
+
+        <label>Recipient email (optional)
+          <input id="form-recipient" placeholder="you@yourdomain.com (optional)" />
+        </label>
+
+        <div class="row">
+          <button id="btn-add-text" class="btn">Add text</button>
+          <button id="btn-add-email" class="btn">Add email</button>
+          <button id="btn-add-textarea" class="btn">Add paragraph</button>
+          <button id="btn-add-number" class="btn">Add number</button>
+          <button id="btn-add-checkbox" class="btn">Add checkbox</button>
+          <button id="btn-add-select" class="btn">Add select</button>
+        </div>
+
+        <div style="margin-top:12px;">
+          <button id="btn-export" class="btn primary">Export form HTML</button>
+          <button id="btn-copy-html" class="btn">Copy HTML to clipboard</button>
+          <button id="btn-download" class="btn">Download HTML</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Fields (drag to reorder)</h2>
+        <ul id="fields" class="fields-list" aria-label="Form fields"></ul>
+      </section>
+
+      <section class="panel">
+        <h2>Preview</h2>
+        <div id="preview" class="preview card"></div>
+      </section>
+    </main>
+
+    <footer>
+      <small>Built to work with Web3Forms — your access key is embedded into exported HTML so submissions go to your Web3Forms account.</small>
+    </footer>
+  </div>
+
+  <script>
+  // ========== Configuration ==========
+  // Your Web3Forms access key (inserted here)
+  const WEB3FORMS_KEY = "1cce650f-afc0-410f-acfd-89f107cf1a8b";
+  // Optionally include a redirect URL after submit, or leave empty
+  const REDIRECT_AFTER_SUBMIT = "";
+
+  // ========== Simple builder logic (no frameworks) ==========
+  const fieldsEl = document.getElementById('fields');
+  const previewEl = document.getElementById('preview');
+  const formNameEl = document.getElementById('form-name');
+  const recipientEl = document.getElementById('form-recipient');
+
+  let fields = []; // { id, type, label, placeholder, required, options (array), help }
+
+  function uid(){ return Math.random().toString(36).slice(2,9) }
+
+  function saveState(){
+    localStorage.setItem('w3f-builder', JSON.stringify({name: formNameEl.value, recipient: recipientEl.value, fields}));
+  }
+  function loadState(){
+    try{
+      const raw = localStorage.getItem('w3f-builder');
+      if(!raw) return;
+      const s = JSON.parse(raw);
+      formNameEl.value = s.name || '';
+      recipientEl.value = s.recipient || '';
+      fields = s.fields || [];
+      renderFields();
+      renderPreview();
+    }catch(e){}
+  }
+
+  // Add field helpers
+  function addField(type){
+    const f = { id: uid(), type, label: type === 'select' ? 'Select' : capitalize(type), placeholder: '', required:false, options: ['Option 1','Option 2'], help: '' };
+    fields.push(f);
+    renderFields();
+    renderPreview();
+    saveState();
+  }
+
+  function capitalize(s){ return s.charAt(0).toUpperCase() + s.slice(1) }
+
+  // Render editor list
+  function renderFields(){
+    fieldsEl.innerHTML = '';
+    fields.forEach((f, i) => {
+      const li = document.createElement('li');
+      li.className = 'field-row';
+      li.draggable = true;
+      li.dataset.index = i;
+
+      li.innerHTML = `
+        <div class="drag-handle">☰</div>
+        <div class="field-main">
+          <div class="field-title">${f.label} <span class="muted">(${f.type})</span></div>
+          <input class="field-label" data-id="${f.id}" value="${escapeHtml(f.label)}" />
+          ${f.type === 'select' ? `<textarea class="field-options" data-id="${f.id}">${(f.options||[]).join('\\n')}</textarea>` : `<input class="field-placeholder" data-id="${f.id}" placeholder="Placeholder" value="${escapeHtml(f.placeholder||'')}" />`}
+          <label class="small"><input type="checkbox" data-id="${f.id}" class="field-required" ${f.required? 'checked':''}/> Required</label>
+          <button class="btn small delete" data-id="${f.id}">Delete</button>
+        </div>
+      `;
+      // events
+      li.querySelector('.field-label').addEventListener('input', (e)=> {
+        const id = e.target.dataset.id;
+        const v = e.target.value;
+        updateField(id, { label: v });
+      });
+      const ph = li.querySelector('.field-placeholder');
+      if(ph){
+        ph.addEventListener('input', (e)=>{
+          updateField(e.target.dataset.id, { placeholder: e.target.value });
+        });
+      }
+      const opts = li.querySelector('.field-options');
+      if(opts){
+        opts.addEventListener('input', (e)=>{
+          updateField(e.target.dataset.id, { options: e.target.value.split('\\n').map(s=>s.trim()).filter(Boolean) });
+        });
+      }
+      li.querySelector('.field-required').addEventListener('change', (e)=>{
+        updateField(e.target.dataset.id, { required: e.target.checked });
+      });
+      li.querySelector('.delete').addEventListener('click', (e)=>{
+        removeField(e.target.dataset.id);
+      });
+
+      // drag events
+      li.addEventListener('dragstart', onDragStart);
+      li.addEventListener('dragover', onDragOver);
+      li.addEventListener('drop', onDrop);
+      li.addEventListener('dragend', onDragEnd);
+
+      fieldsEl.appendChild(li);
+    });
+  }
+
+  function escapeHtml(s){ return (s||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;') }
+
+  function updateField(id, patch){
+    fields = fields.map(f => f.id === id ? {...f, ...patch} : f);
+    renderPreview();
+    saveState();
+  }
+  function removeField(id){
+    fields = fields.filter(f=>f.id !== id);
+    renderFields();
+    renderPreview();
+    saveState();
+  }
+
+  // Drag-and-drop (HTML5)
+  let dragSrcIndex = null;
+  function onDragStart(e){
+    dragSrcIndex = Number(this.dataset.index);
+    e.dataTransfer.effectAllowed = 'move';
+    this.classList.add('dragging');
+  }
+  function onDragOver(e){
+    e.preventDefault();
+    this.classList.add('drag-over');
+  }
+  function onDrop(e){
+    e.stopPropagation();
+    const destIndex = Number(this.dataset.index);
+    if(dragSrcIndex === null || destIndex === dragSrcIndex) return;
+    const moved = fields.splice(dragSrcIndex, 1)[0];
+    fields.splice(destIndex, 0, moved);
+    renderFields();
+    renderPreview();
+    saveState();
+  }
+  function onDragEnd(e){
+    this.classList.remove('dragging');
+    Array.from(document.querySelectorAll('.field-row')).forEach(el => el.classList.remove('drag-over'));
+    dragSrcIndex = null;
+  }
+
+  // Preview rendering
+  function renderPreview(){
+    previewEl.innerHTML = '';
+    const form = document.createElement('form');
+    form.className = 'preview-form';
+    form.onsubmit = (ev) => { ev.preventDefault(); alert('This is a preview. Use Export to get the real HTML.'); };
+
+    fields.forEach(f=>{
+      const wrap = document.createElement('div');
+      wrap.className = 'preview-field';
+      const label = document.createElement('label');
+      label.textContent = f.label + (f.required ? ' *' : '');
+      wrap.appendChild(label);
+
+      if(f.type === 'text' || f.type === 'email' || f.type === 'number'){
+        const input = document.createElement('input');
+        input.type = f.type === 'text' ? 'text' : (f.type === 'number' ? 'number' : 'email');
+        input.placeholder = f.placeholder || '';
+        input.disabled = true;
+        wrap.appendChild(input);
+      } else if(f.type === 'textarea'){
+        const ta = document.createElement('textarea');
+        ta.placeholder = f.placeholder || '';
+        ta.disabled = true;
+        wrap.appendChild(ta);
+      } else if(f.type === 'checkbox'){
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.disabled = true;
+        wrap.appendChild(cb);
+        const help = document.createElement('small');
+        help.textContent = f.help || '';
+        wrap.appendChild(help);
+      } else if(f.type === 'select'){
+        const sel = document.createElement('select');
+        (f.options || []).forEach(opt => {
+          const o = document.createElement('option');
+          o.textContent = opt;
+          sel.appendChild(o);
+        });
+        sel.disabled = true;
+        wrap.appendChild(sel);
+      }
+      form.appendChild(wrap);
+    });
+
+    previewEl.appendChild(form);
+  }
+
+  // Export HTML generation
+  function generateFormHtml(){
+    const formName = (formNameEl.value || 'Form').replaceAll('"','&quot;');
+    const recipient = (recipientEl.value || '').trim();
+    const redirect = REDIRECT_AFTER_SUBMIT || '';
+    // build fields markup
+    let fieldsHtml = '';
+    fields.forEach((f, idx) => {
+      const nameAttr = 'field_' + (idx+1) + '_' + f.id;
+      const requiredAttr = f.required ? 'required' : '';
+      const labelHtml = `<label>${escapeHtml(f.label)}${f.required ? ' *' : ''}</label>`;
+      if(f.type === 'text' || f.type === 'email' || f.type === 'number'){
+        fieldsHtml += `<div class="form-row">${labelHtml}<input name="${nameAttr}" type="${f.type === 'text' ? 'text' : (f.type === 'number' ? 'number' : 'email')}" placeholder="${escapeHtml(f.placeholder||'')}" ${requiredAttr} /></div>`;
+      } else if(f.type === 'textarea'){
+        fieldsHtml += `<div class="form-row">${labelHtml}<textarea name="${nameAttr}" placeholder="${escapeHtml(f.placeholder||'')}" ${requiredAttr}></textarea></div>`;
+      } else if(f.type === 'checkbox'){
+        fieldsHtml += `<div class="form-row"><label><input name="${nameAttr}" type="checkbox" ${requiredAttr}/> ${escapeHtml(f.label)}</label></div>`;
+      } else if(f.type === 'select'){
+        const options = (f.options||[]).map(o => `<option>${escapeHtml(o)}</option>`).join('');
+        fieldsHtml += `<div class="form-row">${labelHtml}<select name="${nameAttr}" ${requiredAttr}>${options}</select></div>`;
+      }
+    });
+
+    // Recipient: optional client-provided; web3forms supports metadata if you include 'subject' or 'recipient' fields
+    // We will add recipient as a hidden input only if user provided it (note: trusting client-provided recipient is fine for personal use)
+    const recipientInput = recipient ? `<input type="hidden" name="recipient" value="${escapeHtml(recipient)}" />` : '';
+
+    const redirectInput = redirect ? `<input type="hidden" name="redirect" value="${escapeHtml(redirect)}" />` : '';
+
+    const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>${formName}</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; padding:20px; background:#f7fafc}
+    .container{max-width:700px;margin:0 auto;background:white;padding:20px;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,0.06)}
+    .form-row{margin-bottom:12px}
+    input,textarea,select{width:100%;padding:10px;border:1px solid #dcdfe6;border-radius:6px}
+    button{padding:10px 14px;border-radius:6px;border:none;background:#2563eb;color:white;cursor:pointer}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>${formName}</h2>
+    <form action="https://api.web3forms.com/submit" method="POST">
+      <input type="hidden" name="access_key" value="${WEB3FORMS_KEY}" />
+      ${recipientInput}
+      ${redirectInput}
+      ${fieldsHtml}
+      <div><button type="submit">Send</button></div>
+    </form>
+  </div>
+</body>
+</html>`;
+    return html;
+  }
+
+  // UI actions
+  document.getElementById('btn-add-text').addEventListener('click', ()=>addField('text'));
+  document.getElementById('btn-add-email').addEventListener('click', ()=>addField('email'));
+  document.getElementById('btn-add-textarea').addEventListener('click', ()=>addField('textarea'));
+  document.getElementById('btn-add-number').addEventListener('click', ()=>addField('number'));
+  document.getElementById('btn-add-checkbox').addEventListener('click', ()=>addField('checkbox'));
+  document.getElementById('btn-add-select').addEventListener('click', ()=>addField('select'));
+
+  document.getElementById('btn-export').addEventListener('click', ()=>{
+    const html = generateFormHtml();
+    // open in new tab
+    const w = window.open();
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+  });
+
+  document.getElementById('btn-copy-html').addEventListener('click', async ()=>{
+    const html = generateFormHtml();
+    try{
+      await navigator.clipboard.writeText(html);
+      alert('Form HTML copied to clipboard — paste it into a file named form.html');
+    }catch(e){
+      alert('Copy failed: ' + e.message);
+    }
+  });
+
+  document.getElementById('btn-download').addEventListener('click', ()=>{
+    const html = generateFormHtml();
+    const a = document.createElement('a');
+    a.href = 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
+    a.download = (formNameEl.value || 'form') + '.html';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+
+  // Save form name/recipient changes
+  formNameEl.addEventListener('input', ()=>{ saveState(); });
+  recipientEl.addEventListener('input', ()=>{ saveState(); });
+
+  // Initialize
+  loadState();
+  renderPreview();
+  </script>
+</body>
+</html>
